@@ -26,6 +26,7 @@ type WordCard = {
 type ExampleSentence = {
   sentence: string;
   translation: string;
+  cached?: boolean;
 };
 
 type WordDeck = {
@@ -35,7 +36,7 @@ type WordDeck = {
   createdAt: string;
 };
 
-type Screen = "home" | "edit" | "quiz" | "complete";
+type Screen = "home" | "edit" | "minimal" | "quiz" | "complete";
 
 type QuizState = {
   deckId: string;
@@ -94,6 +95,10 @@ export default function HomeScreen() {
   const [selectedDeckId, setSelectedDeckId] = useState<string | null>(null);
   const [newWord, setNewWord] = useState("");
   const [newTranslation, setNewTranslation] = useState("");
+  const [minimalWords, setMinimalWords] = useState<string[]>([]);
+  const [minimalInput, setMinimalInput] = useState("");
+  const [minimalResolving, setMinimalResolving] = useState(false);
+  const [minimalError, setMinimalError] = useState("");
   const [quiz, setQuiz] = useState<QuizState | null>(null);
   const [answerVisible, setAnswerVisible] = useState(false);
   const [example, setExample] = useState<ExampleSentence | null>(null);
@@ -101,6 +106,7 @@ export default function HomeScreen() {
   const [exampleError, setExampleError] = useState(false);
   const [lastExampleSentence, setLastExampleSentence] = useState("");
   const exampleMutation = trpc.examples.generate.useMutation();
+  const resolveWordMutation = trpc.words.resolve.useMutation();
 
   useEffect(() => {
     let mounted = true;
@@ -179,6 +185,62 @@ export default function HomeScreen() {
     setScreen("edit");
   }
 
+  function openMinimalMode() {
+    tapHaptic();
+    setMinimalWords([]);
+    setMinimalInput("");
+    setMinimalError("");
+    setScreen("minimal");
+  }
+
+  function addMinimalWord() {
+    const word = minimalInput.trim();
+    if (!word) return;
+    if (!/^[A-Za-z]+(?:[-'][A-Za-z]+)*$/.test(word)) {
+      setMinimalError("請輸入單一英文單字，例如 apple 或 don't。");
+      return;
+    }
+    if (minimalWords.some((item) => item.toLocaleLowerCase("en-US") === word.toLocaleLowerCase("en-US"))) {
+      setMinimalError("這個單字已經在清單裡了。");
+      setMinimalInput("");
+      return;
+    }
+    tapHaptic();
+    setMinimalWords((current) => [...current, word]);
+    setMinimalInput("");
+    setMinimalError("");
+  }
+
+  function removeMinimalWord(word: string) {
+    setMinimalWords((current) => current.filter((item) => item !== word));
+  }
+
+  async function finishMinimalMode() {
+    if (minimalWords.length === 0 || minimalResolving) return;
+    setMinimalResolving(true);
+    setMinimalError("");
+    try {
+      const cards: WordCard[] = [];
+      for (const word of minimalWords) {
+        const result = await resolveWordMutation.mutateAsync({ word });
+        cards.push({ id: makeId(), word: result.word, translation: result.translation });
+      }
+      const deck: WordDeck = {
+        id: makeId(),
+        title: `極簡單字集 · ${new Date().toLocaleDateString("zh-TW")}`,
+        cards,
+        createdAt: new Date().toISOString(),
+      };
+      setDecks((currentDecks) => [deck, ...currentDecks]);
+      setSelectedDeckId(deck.id);
+      setMinimalResolving(false);
+      setScreen("edit");
+    } catch {
+      setMinimalError("有單字的中文解釋載入失敗，請確認網路後再試。");
+      setMinimalResolving(false);
+    }
+  }
+
   function addCard() {
     if (!selectedDeck) return;
     const word = newWord.trim();
@@ -192,6 +254,7 @@ export default function HomeScreen() {
     tapHaptic();
     const card: WordCard = { id: makeId(), word, translation };
     updateDeck(selectedDeck.id, (deck) => ({ ...deck, cards: [...deck.cards, card] }));
+    void resolveWordMutation.mutateAsync({ word, translation }).catch(() => undefined);
     setNewWord("");
     setNewTranslation("");
   }
@@ -251,17 +314,43 @@ export default function HomeScreen() {
     setScreen("quiz");
   }
 
-  function speakWord(word: string) {
+  function speakText(text: string) {
+    if (!text.trim()) return;
     void (async () => {
       try {
         if (await Speech.isSpeakingAsync()) {
           await Speech.stop();
         }
-        Speech.speak(word, { language: "en-US", rate: 0.82, pitch: 1 });
+        Speech.speak(text, { language: "en-US", rate: 0.82, pitch: 1 });
       } catch {
-        Speech.speak(word, { language: "en-US" });
+        Speech.speak(text, { language: "en-US" });
       }
     })();
+  }
+
+  function regenerateExample() {
+    if (!currentQuizCard || exampleLoading) return;
+    setExampleError(false);
+    setExampleLoading(true);
+    exampleMutation.mutate(
+      {
+        word: currentQuizCard.word,
+        translation: currentQuizCard.translation,
+        avoidSentence: example?.sentence ?? lastExampleSentence ?? undefined,
+        forceRegenerate: true,
+      },
+      {
+        onSuccess: (result) => {
+          setExample(result);
+          setLastExampleSentence(result.sentence);
+          setExampleLoading(false);
+        },
+        onError: () => {
+          setExampleError(true);
+          setExampleLoading(false);
+        },
+      },
+    );
   }
 
   function revealCard() {
@@ -398,7 +487,8 @@ export default function HomeScreen() {
         exampleLoading={exampleLoading}
         exampleError={exampleError}
         onReveal={revealCard}
-        onSpeak={speakWord}
+        onSpeakText={speakText}
+        onRegenerateExample={regenerateExample}
         onClassify={classifyCard}
         onClose={leaveQuiz}
       />
@@ -420,7 +510,117 @@ export default function HomeScreen() {
     );
   }
 
-  return <DeckHome decks={decks} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} />;
+  if (screen === "minimal") {
+    return (
+      <MinimalInputScreen
+        words={minimalWords}
+        input={minimalInput}
+        loading={minimalResolving}
+        error={minimalError}
+        onChangeInput={setMinimalInput}
+        onAddWord={addMinimalWord}
+        onRemoveWord={removeMinimalWord}
+        onFinish={finishMinimalMode}
+        onBack={() => setScreen("home")}
+      />
+    );
+  }
+
+  return <DeckHome decks={decks} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
+}
+
+function MinimalInputScreen({
+  words,
+  input,
+  loading,
+  error,
+  onChangeInput,
+  onAddWord,
+  onRemoveWord,
+  onFinish,
+  onBack,
+}: {
+  words: string[];
+  input: string;
+  loading: boolean;
+  error: string;
+  onChangeInput: (value: string) => void;
+  onAddWord: () => void;
+  onRemoveWord: (word: string) => void;
+  onFinish: () => void;
+  onBack: () => void;
+}) {
+  return (
+    <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.screen}>
+      <FlatList
+        data={words}
+        keyExtractor={(word, index) => `${word}-${index}`}
+        contentContainerStyle={styles.minimalList}
+        ListHeaderComponent={
+          <View>
+            <View style={styles.minimalNav}>
+              <Pressable onPress={onBack} style={({ pressed }) => [styles.circleButton, pressed && styles.pressed]} accessibilityLabel="返回首頁">
+                <MaterialIcons name="arrow-back" size={22} color="#173937" />
+              </Pressable>
+              <View style={styles.minimalNavCopy}>
+                <Text style={styles.minimalEyebrow}>QUICK CAPTURE</Text>
+                <Text style={styles.minimalTitle}>極簡輸入</Text>
+              </View>
+              <View style={styles.minimalNavIcon}>
+                <MaterialIcons name="short-text" size={23} color="#156D72" />
+              </View>
+            </View>
+            <Text style={styles.minimalDescription}>只輸入英文單字，按 Enter 連續加入。全部輸入完成後，App 才會一次補齊中文解釋。</Text>
+            <View style={styles.minimalInputCard}>
+              <TextInput
+                value={input}
+                onChangeText={onChangeInput}
+                onSubmitEditing={onAddWord}
+                style={styles.minimalInput}
+                placeholder="例如 apple"
+                placeholderTextColor="#9AA9A6"
+                autoCapitalize="none"
+                autoCorrect={false}
+                returnKeyType="done"
+                editable={!loading}
+                accessibilityLabel="輸入英文單字"
+              />
+              <Pressable onPress={onAddWord} style={({ pressed }) => [styles.minimalAddButton, pressed && styles.pressed]} disabled={loading} accessibilityLabel="加入英文單字">
+                <MaterialIcons name="add" size={21} color="#FFFFFF" />
+              </Pressable>
+            </View>
+            {error ? <Text style={styles.minimalError}>{error}</Text> : null}
+            <View style={styles.minimalSectionHeader}>
+              <Text style={styles.cardListTitle}>待建立單字</Text>
+              <Text style={styles.cardListCount}>{words.length} 個</Text>
+            </View>
+          </View>
+        }
+        ListEmptyComponent={
+          <View style={styles.minimalEmptyCard}>
+            <MaterialIcons name="keyboard" size={27} color="#76A9A7" />
+            <Text style={styles.emptyWordsTitle}>先輸入第一個單字</Text>
+            <Text style={styles.emptyWordsText}>按 Enter 後，游標會留在輸入框裡。</Text>
+          </View>
+        }
+        renderItem={({ item, index }) => (
+          <View style={styles.minimalWordRow}>
+            <Text style={styles.wordIndex}>{String(index + 1).padStart(2, "0")}</Text>
+            <Text style={styles.minimalWordText}>{item}</Text>
+            <Pressable onPress={() => onRemoveWord(item)} style={({ pressed }) => [styles.minimalRemoveButton, pressed && styles.pressed]} accessibilityLabel={`移除 ${item}`}>
+              <MaterialIcons name="close" size={17} color="#8A9895" />
+            </Pressable>
+          </View>
+        )}
+        ListFooterComponent={
+          <Pressable onPress={onFinish} style={({ pressed }) => [styles.minimalFinishButton, (words.length === 0 || loading) && styles.disabledButton, pressed && words.length > 0 && !loading && styles.pressed]} disabled={words.length === 0 || loading}>
+            {loading ? <MaterialIcons name="hourglass-top" size={20} color="#FFFFFF" /> : <MaterialIcons name="auto-awesome" size={20} color="#FFFFFF" />}
+            <Text style={styles.minimalFinishText}>{loading ? "正在補齊中文解釋…" : "完成並建立單字集"}</Text>
+          </Pressable>
+        }
+      />
+    </ScreenContainer>
+  );
 }
 
 function DeckHome({
@@ -428,11 +628,13 @@ function DeckHome({
   onOpenDeck,
   onCreateDeck,
   onStartQuiz,
+  onOpenMinimal,
 }: {
   decks: WordDeck[];
   onOpenDeck: (deckId: string) => void;
   onCreateDeck: () => void;
   onStartQuiz: (deck: WordDeck) => void;
+  onOpenMinimal: () => void;
 }) {
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.screen}>
@@ -444,10 +646,16 @@ function DeckHome({
         ListHeaderComponent={
           <View style={styles.homeHeader}>
             <View style={styles.brandRow}>
-              <View style={styles.brandMark}>
-                <Text style={styles.brandMarkText}>V</Text>
+              <View style={styles.brandIdentity}>
+                <View style={styles.brandMark}>
+                  <Text style={styles.brandMarkText}>V</Text>
+                </View>
+                <Text style={styles.brandName}>VOCAB LOOP</Text>
               </View>
-              <Text style={styles.brandName}>VOCAB LOOP</Text>
+              <Pressable onPress={onOpenMinimal} style={({ pressed }) => [styles.minimalHomeButton, pressed && styles.pressed]} accessibilityLabel="開啟極簡輸入模式">
+                <MaterialIcons name="short-text" size={18} color="#156D72" />
+                <Text style={styles.minimalHomeButtonText}>極簡輸入</Text>
+              </Pressable>
             </View>
             <Text style={styles.homeTitle}>把記不住的，{`\n`}留在下一張。</Text>
             <Text style={styles.homeDescription}>
@@ -683,7 +891,8 @@ function QuizScreen({
   exampleLoading,
   exampleError,
   onReveal,
-  onSpeak,
+  onSpeakText,
+  onRegenerateExample,
   onClassify,
   onClose,
 }: {
@@ -696,7 +905,8 @@ function QuizScreen({
   exampleLoading: boolean;
   exampleError: boolean;
   onReveal: () => void;
-  onSpeak: (word: string) => void;
+  onSpeakText: (text: string) => void;
+  onRegenerateExample: () => void;
   onClassify: (known: boolean) => void;
   onClose: () => void;
 }) {
@@ -740,7 +950,7 @@ function QuizScreen({
               <Pressable
                 onPress={(event) => {
                   event.stopPropagation();
-                  onSpeak(card.word);
+                  onSpeakText(card.word);
                 }}
                 style={({ pressed }) => [styles.speakButton, pressed && styles.pressed]}
                 accessibilityLabel={`朗讀 ${card.word}`}
@@ -759,16 +969,30 @@ function QuizScreen({
               <View style={styles.exampleBlock}>
                 <View style={styles.exampleHeader}>
                   <Text style={styles.exampleLabel}>AI 例句</Text>
-                  <Pressable
-                    onPress={(event) => {
-                      event.stopPropagation();
-                      onSpeak(card.word);
-                    }}
-                    style={({ pressed }) => [styles.exampleSpeakButton, pressed && styles.pressed]}
-                    accessibilityLabel={`朗讀例句中的 ${card.word}`}
-                  >
-                    <MaterialIcons name="volume-up" size={16} color="#156D72" />
-                  </Pressable>
+                  <View style={styles.exampleActions}>
+                    <Pressable
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        if (example?.sentence) onSpeakText(example.sentence);
+                      }}
+                      style={({ pressed }) => [styles.exampleSpeakButton, !example && styles.disabledButton, pressed && example && styles.pressed]}
+                      accessibilityLabel="朗讀完整例句"
+                      disabled={!example || exampleLoading}
+                    >
+                      <MaterialIcons name="volume-up" size={16} color="#156D72" />
+                    </Pressable>
+                    <Pressable
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        onRegenerateExample();
+                      }}
+                      style={({ pressed }) => [styles.exampleRegenerateButton, (!example || exampleLoading) && styles.disabledButton, pressed && example && !exampleLoading && styles.pressed]}
+                      accessibilityLabel="重新生成例句"
+                      disabled={!example || exampleLoading}
+                    >
+                      <MaterialIcons name="refresh" size={16} color="#C76739" />
+                    </Pressable>
+                  </View>
                 </View>
                 {exampleLoading ? (
                   <View style={styles.exampleLoadingRow}>
@@ -782,7 +1006,9 @@ function QuizScreen({
                     <Text style={styles.exampleSentence}>{example.sentence}</Text>
                     <Text style={styles.exampleTranslation}>{example.translation}</Text>
                   </>
-                ) : null}
+                ) : (
+                  <Text style={styles.exampleWaitingText}>再點一下卡片生成例句</Text>
+                )}
               </View>
               <Text style={styles.tapHint}>再點一下可收起翻譯</Text>
             </View>
@@ -908,6 +1134,135 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
     paddingBottom: 18,
   },
+  minimalList: {
+    paddingHorizontal: 20,
+    paddingBottom: 24,
+  },
+  minimalNav: {
+    paddingTop: 20,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  minimalNavCopy: {
+    flex: 1,
+  },
+  minimalEyebrow: {
+    color: "#7A918E",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 1.2,
+  },
+  minimalTitle: {
+    color: "#173937",
+    fontSize: 24,
+    fontWeight: "800",
+    marginTop: 3,
+  },
+  minimalNavIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    backgroundColor: "#E9F5F1",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  minimalDescription: {
+    color: "#637673",
+    fontSize: 14,
+    lineHeight: 21,
+    marginTop: 18,
+    marginBottom: 16,
+  },
+  minimalInputCard: {
+    minHeight: 62,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    paddingLeft: 16,
+    paddingRight: 8,
+    borderRadius: 19,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#DCE8E1",
+  },
+  minimalInput: {
+    flex: 1,
+    color: "#173937",
+    fontSize: 17,
+    fontWeight: "700",
+  },
+  minimalAddButton: {
+    width: 46,
+    height: 46,
+    borderRadius: 15,
+    backgroundColor: "#156D72",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  minimalError: {
+    color: "#B64E4A",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 8,
+  },
+  minimalSectionHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 30,
+    marginBottom: 10,
+  },
+  minimalEmptyCard: {
+    padding: 28,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: "#CFE0DA",
+    alignItems: "center",
+    backgroundColor: "#F6FAF7",
+  },
+  minimalWordRow: {
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+    borderRadius: 16,
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E5EBE5",
+  },
+  minimalWordText: {
+    flex: 1,
+    color: "#173937",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  minimalRemoveButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    backgroundColor: "#F7F8F4",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  minimalFinishButton: {
+    minHeight: 58,
+    marginTop: 18,
+    borderRadius: 18,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#173937",
+  },
+  minimalFinishText: {
+    color: "#FFFFFF",
+    fontSize: 15,
+    fontWeight: "800",
+  },
   homeHeader: {
     paddingTop: 20,
     paddingBottom: 24,
@@ -917,6 +1272,26 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 9,
     marginBottom: 31,
+  },
+  brandIdentity: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+    flex: 1,
+  },
+  minimalHomeButton: {
+    minHeight: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    paddingHorizontal: 10,
+    borderRadius: 11,
+    backgroundColor: "#E9F5F1",
+  },
+  minimalHomeButtonText: {
+    color: "#156D72",
+    fontSize: 11,
+    fontWeight: "900",
   },
   brandMark: {
     width: 29,
@@ -1532,11 +1907,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
   },
+  exampleActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
   exampleSpeakButton: {
     width: 28,
     height: 28,
     borderRadius: 9,
     backgroundColor: "#DDF0EB",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  exampleRegenerateButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    backgroundColor: "#FBE7D7",
     alignItems: "center",
     justifyContent: "center",
   },
@@ -1586,6 +1974,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     lineHeight: 18,
     marginTop: 6,
+  },
+  exampleWaitingText: {
+    color: "#6D8580",
+    fontSize: 12,
+    marginTop: 7,
   },
   tapHint: {
     color: "#849793",
