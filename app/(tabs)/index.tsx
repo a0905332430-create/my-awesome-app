@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import * as Haptics from "expo-haptics";
+import * as Speech from "expo-speech";
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -14,10 +15,16 @@ import {
 } from "react-native";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { trpc } from "@/lib/trpc";
 
 type WordCard = {
   id: string;
   word: string;
+  translation: string;
+};
+
+type ExampleSentence = {
+  sentence: string;
   translation: string;
 };
 
@@ -88,6 +95,11 @@ export default function HomeScreen() {
   const [newTranslation, setNewTranslation] = useState("");
   const [quiz, setQuiz] = useState<QuizState | null>(null);
   const [answerVisible, setAnswerVisible] = useState(false);
+  const [example, setExample] = useState<ExampleSentence | null>(null);
+  const [exampleLoading, setExampleLoading] = useState(false);
+  const [exampleError, setExampleError] = useState(false);
+  const [lastExampleSentence, setLastExampleSentence] = useState("");
+  const exampleMutation = trpc.examples.generate.useMutation();
 
   useEffect(() => {
     let mounted = true;
@@ -231,7 +243,56 @@ export default function HomeScreen() {
       currentCardId: pickNextCard(activeCardIds),
     });
     setAnswerVisible(false);
+    setExample(null);
+    setExampleError(false);
+    setLastExampleSentence("");
     setScreen("quiz");
+  }
+
+  function speakWord(word: string) {
+    void (async () => {
+      try {
+        if (await Speech.isSpeakingAsync()) {
+          await Speech.stop();
+        }
+        Speech.speak(word, { language: "en-US", rate: 0.82, pitch: 1 });
+      } catch {
+        Speech.speak(word, { language: "en-US" });
+      }
+    })();
+  }
+
+  function revealCard() {
+    tapHaptic();
+    const nextVisible = !answerVisible;
+    const previousSentence = lastExampleSentence;
+    setAnswerVisible(nextVisible);
+    setExample(null);
+    setExampleError(false);
+
+    if (nextVisible && currentQuizCard) {
+      setExampleLoading(true);
+      exampleMutation.mutate(
+        {
+          word: currentQuizCard.word,
+          translation: currentQuizCard.translation,
+          avoidSentence: previousSentence || undefined,
+        },
+        {
+          onSuccess: (result) => {
+            setExample(result);
+            setLastExampleSentence(result.sentence);
+            setExampleLoading(false);
+          },
+          onError: () => {
+            setExampleError(true);
+            setExampleLoading(false);
+          },
+        },
+      );
+    } else {
+      setExampleLoading(false);
+    }
   }
 
   function classifyCard(known: boolean) {
@@ -247,6 +308,10 @@ export default function HomeScreen() {
         };
       });
       setAnswerVisible(false);
+      setExample(null);
+      setExampleError(false);
+      setExampleLoading(false);
+      setLastExampleSentence("");
       return;
     }
 
@@ -263,11 +328,19 @@ export default function HomeScreen() {
       currentCardId: pickNextCard(remainingCardIds, currentQuizCard.id),
     });
     setAnswerVisible(false);
+    setExample(null);
+    setExampleError(false);
+    setExampleLoading(false);
+    setLastExampleSentence("");
   }
 
   function leaveQuiz() {
     setQuiz(null);
     setAnswerVisible(false);
+    setExample(null);
+    setExampleError(false);
+    setExampleLoading(false);
+    setLastExampleSentence("");
     setScreen(selectedDeck ? "edit" : "home");
   }
 
@@ -310,10 +383,11 @@ export default function HomeScreen() {
         quiz={quiz}
         card={currentQuizCard}
         answerVisible={answerVisible}
-        onReveal={() => {
-          tapHaptic();
-          setAnswerVisible((visible) => !visible);
-        }}
+        example={example}
+        exampleLoading={exampleLoading}
+        exampleError={exampleError}
+        onReveal={revealCard}
+        onSpeak={speakWord}
         onClassify={classifyCard}
         onClose={leaveQuiz}
       />
@@ -580,7 +654,11 @@ function QuizScreen({
   quiz,
   card,
   answerVisible,
+  example,
+  exampleLoading,
+  exampleError,
   onReveal,
+  onSpeak,
   onClassify,
   onClose,
 }: {
@@ -588,7 +666,11 @@ function QuizScreen({
   quiz: QuizState;
   card: WordCard;
   answerVisible: boolean;
+  example: ExampleSentence | null;
+  exampleLoading: boolean;
+  exampleError: boolean;
   onReveal: () => void;
+  onSpeak: (word: string) => void;
   onClassify: (known: boolean) => void;
   onClose: () => void;
 }) {
@@ -625,7 +707,19 @@ function QuizScreen({
             <View style={styles.languagePill}>
               <Text style={styles.languagePillText}>ENGLISH</Text>
             </View>
-            <MaterialIcons name={answerVisible ? "visibility-off" : "visibility"} size={20} color="#76A9A7" />
+            <View style={styles.cardTopActions}>
+              <Pressable
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onSpeak(card.word);
+                }}
+                style={({ pressed }) => [styles.speakButton, pressed && styles.pressed]}
+                accessibilityLabel={`朗讀 ${card.word}`}
+              >
+                <MaterialIcons name="volume-up" size={20} color="#156D72" />
+              </Pressable>
+              <MaterialIcons name={answerVisible ? "visibility-off" : "visibility"} size={20} color="#76A9A7" />
+            </View>
           </View>
           <Text style={styles.quizWord}>{card.word}</Text>
           <View style={styles.cardDivider} />
@@ -633,6 +727,25 @@ function QuizScreen({
             <View style={styles.answerArea}>
               <Text style={styles.answerLabel}>你的翻譯</Text>
               <Text style={styles.answerText}>{card.translation}</Text>
+              <View style={styles.exampleBlock}>
+                <View style={styles.exampleHeader}>
+                  <Text style={styles.exampleLabel}>AI 例句</Text>
+                  <Text style={styles.exampleBadge}>NEW</Text>
+                </View>
+                {exampleLoading ? (
+                  <View style={styles.exampleLoadingRow}>
+                    <View style={styles.exampleLoadingDot} />
+                    <Text style={styles.exampleLoadingText}>正在為這張卡想一個新例句…</Text>
+                  </View>
+                ) : exampleError ? (
+                  <Text style={styles.exampleErrorText}>例句載入失敗，但你仍可以繼續作答。</Text>
+                ) : example ? (
+                  <>
+                    <Text style={styles.exampleSentence}>{example.sentence}</Text>
+                    <Text style={styles.exampleTranslation}>{example.translation}</Text>
+                  </>
+                ) : null}
+              </View>
               <Text style={styles.tapHint}>再點一下可收起翻譯</Text>
             </View>
           ) : (
@@ -1283,6 +1396,19 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
+  cardTopActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  speakButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    backgroundColor: "#DDF0EB",
+    alignItems: "center",
+    justifyContent: "center",
+  },
   languagePill: {
     paddingHorizontal: 9,
     paddingVertical: 6,
@@ -1334,6 +1460,66 @@ const styles = StyleSheet.create({
     lineHeight: 32,
     fontWeight: "800",
     marginTop: 5,
+  },
+  exampleBlock: {
+    marginTop: 14,
+    padding: 12,
+    borderRadius: 15,
+    backgroundColor: "#EEF6F1",
+    borderWidth: 1,
+    borderColor: "#D5E8DF",
+  },
+  exampleHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  exampleLabel: {
+    color: "#337D78",
+    fontSize: 10,
+    fontWeight: "900",
+    letterSpacing: 0.8,
+  },
+  exampleBadge: {
+    color: "#C76739",
+    fontSize: 9,
+    fontWeight: "900",
+    letterSpacing: 0.6,
+  },
+  exampleSentence: {
+    color: "#234B49",
+    fontSize: 14,
+    lineHeight: 20,
+    fontWeight: "800",
+    marginTop: 7,
+  },
+  exampleTranslation: {
+    color: "#6D8580",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 3,
+  },
+  exampleLoadingRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    marginTop: 8,
+  },
+  exampleLoadingDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: "#4A9B91",
+  },
+  exampleLoadingText: {
+    color: "#6D8580",
+    fontSize: 12,
+  },
+  exampleErrorText: {
+    color: "#B64E4A",
+    fontSize: 12,
+    lineHeight: 18,
+    marginTop: 6,
   },
   tapHint: {
     color: "#849793",
