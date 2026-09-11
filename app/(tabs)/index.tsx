@@ -42,6 +42,7 @@ type QuizState = {
   total: number;
   activeCardIds: string[];
   currentCardId: string;
+  reversed: boolean;
 };
 
 const STORAGE_KEY = "vocab-loop.decks.v1";
@@ -228,7 +229,7 @@ export default function HomeScreen() {
     ]);
   }
 
-  function startQuiz(deck: WordDeck) {
+  function startQuiz(deck: WordDeck, reversed = false) {
     if (deck.cards.length === 0) {
       Alert.alert("先加入單字卡", "這個單字集目前還沒有可測驗的內容。 ");
       return;
@@ -241,6 +242,7 @@ export default function HomeScreen() {
       total: activeCardIds.length,
       activeCardIds,
       currentCardId: pickNextCard(activeCardIds),
+      reversed,
     });
     setAnswerVisible(false);
     setExample(null);
@@ -264,19 +266,22 @@ export default function HomeScreen() {
 
   function revealCard() {
     tapHaptic();
-    const nextVisible = !answerVisible;
-    const previousSentence = lastExampleSentence;
-    setAnswerVisible(nextVisible);
-    setExample(null);
-    setExampleError(false);
+    if (!answerVisible) {
+      setAnswerVisible(true);
+      setExample(null);
+      setExampleError(false);
+      setExampleLoading(false);
+      return;
+    }
 
-    if (nextVisible && currentQuizCard) {
+    if (!example && !exampleLoading && currentQuizCard) {
+      setExampleError(false);
       setExampleLoading(true);
       exampleMutation.mutate(
         {
           word: currentQuizCard.word,
           translation: currentQuizCard.translation,
-          avoidSentence: previousSentence || undefined,
+          avoidSentence: lastExampleSentence || undefined,
         },
         {
           onSuccess: (result) => {
@@ -290,9 +295,13 @@ export default function HomeScreen() {
           },
         },
       );
-    } else {
-      setExampleLoading(false);
+      return;
     }
+
+    setAnswerVisible(false);
+    setExample(null);
+    setExampleError(false);
+    setExampleLoading(false);
   }
 
   function classifyCard(known: boolean) {
@@ -372,6 +381,7 @@ export default function HomeScreen() {
         onBack={() => setScreen("home")}
         onDeleteDeck={removeDeck}
         onStartQuiz={() => startQuiz(selectedDeck)}
+        onStartQuizReversed={() => startQuiz(selectedDeck, true)}
       />
     );
   }
@@ -383,6 +393,7 @@ export default function HomeScreen() {
         quiz={quiz}
         card={currentQuizCard}
         answerVisible={answerVisible}
+        reversed={quiz.reversed}
         example={example}
         exampleLoading={exampleLoading}
         exampleError={exampleError}
@@ -514,6 +525,7 @@ function DeckEditor({
   onBack,
   onDeleteDeck,
   onStartQuiz,
+  onStartQuizReversed,
 }: {
   deck: WordDeck;
   newWord: string;
@@ -526,6 +538,7 @@ function DeckEditor({
   onBack: () => void;
   onDeleteDeck: () => void;
   onStartQuiz: () => void;
+  onStartQuizReversed: () => void;
 }) {
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.screen}>
@@ -630,19 +643,30 @@ function DeckEditor({
           </View>
         )}
         ListFooterComponent={
-          <Pressable
-            onPress={onStartQuiz}
-            style={({ pressed }) => [styles.startQuizButton, deck.cards.length === 0 && styles.disabledButton, pressed && deck.cards.length > 0 && styles.pressed]}
-            disabled={deck.cards.length === 0}
-          >
-            <View style={styles.startQuizButtonCopy}>
-              <Text style={styles.startQuizEyebrow}>START A LOOP</Text>
-              <Text style={styles.startQuizLabel}>開始這組測驗</Text>
-            </View>
-            <View style={styles.startQuizIcon}>
-              <MaterialIcons name="arrow-forward" size={22} color="#156D72" />
-            </View>
-          </Pressable>
+          <View style={styles.startQuizRow}>
+            <Pressable
+              onPress={onStartQuiz}
+              style={({ pressed }) => [styles.startQuizButton, deck.cards.length === 0 && styles.disabledButton, pressed && deck.cards.length > 0 && styles.pressed]}
+              disabled={deck.cards.length === 0}
+            >
+              <View style={styles.startQuizButtonCopy}>
+                <Text style={styles.startQuizEyebrow}>START A LOOP</Text>
+                <Text style={styles.startQuizLabel}>開始這組測驗</Text>
+              </View>
+              <View style={styles.startQuizIcon}>
+                <MaterialIcons name="arrow-forward" size={22} color="#156D72" />
+              </View>
+            </Pressable>
+            <Pressable
+              onPress={onStartQuizReversed}
+              style={({ pressed }) => [styles.reverseQuizButton, deck.cards.length === 0 && styles.disabledButton, pressed && deck.cards.length > 0 && styles.pressed]}
+              disabled={deck.cards.length === 0}
+              accessibilityLabel="反轉字卡開始測驗"
+            >
+              <MaterialIcons name="swap-vert" size={23} color="#156D72" />
+              <Text style={styles.reverseQuizText}>反轉</Text>
+            </Pressable>
+          </View>
         }
       />
     </ScreenContainer>
@@ -654,6 +678,7 @@ function QuizScreen({
   quiz,
   card,
   answerVisible,
+  reversed,
   example,
   exampleLoading,
   exampleError,
@@ -666,6 +691,7 @@ function QuizScreen({
   quiz: QuizState;
   card: WordCard;
   answerVisible: boolean;
+  reversed: boolean;
   example: ExampleSentence | null;
   exampleLoading: boolean;
   exampleError: boolean;
@@ -675,6 +701,9 @@ function QuizScreen({
   onClose: () => void;
 }) {
   const mastered = quiz.total - quiz.activeCardIds.length;
+  const frontText = reversed ? card.translation : card.word;
+  const backLabel = reversed ? "英文單字" : "你的翻譯";
+  const backText = reversed ? card.word : card.translation;
 
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.quizScreen}>
@@ -705,7 +734,7 @@ function QuizScreen({
         >
           <View style={styles.cardSurfaceTop}>
             <View style={styles.languagePill}>
-              <Text style={styles.languagePillText}>ENGLISH</Text>
+              <Text style={styles.languagePillText}>{reversed ? "中文提示" : "ENGLISH"}</Text>
             </View>
             <View style={styles.cardTopActions}>
               <Pressable
@@ -721,16 +750,25 @@ function QuizScreen({
               <MaterialIcons name={answerVisible ? "visibility-off" : "visibility"} size={20} color="#76A9A7" />
             </View>
           </View>
-          <Text style={styles.quizWord}>{card.word}</Text>
+          <Text style={styles.quizWord}>{frontText}</Text>
           <View style={styles.cardDivider} />
           {answerVisible ? (
             <View style={styles.answerArea}>
-              <Text style={styles.answerLabel}>你的翻譯</Text>
-              <Text style={styles.answerText}>{card.translation}</Text>
+              <Text style={styles.answerLabel}>{backLabel}</Text>
+              <Text style={styles.answerText}>{backText}</Text>
               <View style={styles.exampleBlock}>
                 <View style={styles.exampleHeader}>
                   <Text style={styles.exampleLabel}>AI 例句</Text>
-                  <Text style={styles.exampleBadge}>NEW</Text>
+                  <Pressable
+                    onPress={(event) => {
+                      event.stopPropagation();
+                      onSpeak(card.word);
+                    }}
+                    style={({ pressed }) => [styles.exampleSpeakButton, pressed && styles.pressed]}
+                    accessibilityLabel={`朗讀例句中的 ${card.word}`}
+                  >
+                    <MaterialIcons name="volume-up" size={16} color="#156D72" />
+                  </Pressable>
                 </View>
                 {exampleLoading ? (
                   <View style={styles.exampleLoadingRow}>
@@ -757,7 +795,7 @@ function QuizScreen({
         </Pressable>
 
         <Text style={styles.classifyPrompt}>
-          {answerVisible ? "看完翻譯後，這個字你記得嗎？" : "先點選卡片，查看你的翻譯"}
+          {answerVisible ? "看完內容後，這個字你記得嗎？" : `先點選卡片，查看${reversed ? "英文單字" : "翻譯"}`}
         </Text>
       </View>
 
@@ -1272,9 +1310,15 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  startQuizRow: {
+    flexDirection: "row",
+    alignItems: "stretch",
+    gap: 10,
+    marginTop: 24,
+  },
   startQuizButton: {
     minHeight: 74,
-    marginTop: 24,
+    flex: 1,
     paddingLeft: 20,
     paddingRight: 12,
     borderRadius: 22,
@@ -1296,6 +1340,20 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 18,
     fontWeight: "800",
+  },
+  reverseQuizButton: {
+    width: 78,
+    minHeight: 74,
+    borderRadius: 22,
+    backgroundColor: "#DDF0EB",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 3,
+  },
+  reverseQuizText: {
+    color: "#156D72",
+    fontSize: 12,
+    fontWeight: "900",
   },
   startQuizIcon: {
     width: 49,
@@ -1473,6 +1531,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+  },
+  exampleSpeakButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 9,
+    backgroundColor: "#DDF0EB",
+    alignItems: "center",
+    justifyContent: "center",
   },
   exampleLabel: {
     color: "#337D78",
