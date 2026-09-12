@@ -46,7 +46,20 @@ type QuizState = {
   reversed: boolean;
 };
 
+type LearningStats = {
+  masteredWords: string[];
+  mistakeCounts: Record<string, number>;
+  mistakeLabels: Record<string, string>;
+};
+
+type MinimalProgress = {
+  current: number;
+  total: number;
+  word: string;
+};
+
 const STORAGE_KEY = "vocab-loop.decks.v1";
+const STATS_STORAGE_KEY = "vocab-loop.learning-stats.v1";
 
 const STARTER_DECKS: WordDeck[] = [
   {
@@ -88,6 +101,16 @@ function successHaptic() {
   }
 }
 
+function normalizeLocalWord(word: string) {
+  return word.trim().toLocaleLowerCase("en-US");
+}
+
+const EMPTY_STATS: LearningStats = {
+  masteredWords: [],
+  mistakeCounts: {},
+  mistakeLabels: {},
+};
+
 export default function HomeScreen() {
   const [decks, setDecks] = useState<WordDeck[]>([]);
   const [hydrated, setHydrated] = useState(false);
@@ -99,6 +122,8 @@ export default function HomeScreen() {
   const [minimalInput, setMinimalInput] = useState("");
   const [minimalResolving, setMinimalResolving] = useState(false);
   const [minimalError, setMinimalError] = useState("");
+  const [minimalProgress, setMinimalProgress] = useState<MinimalProgress | null>(null);
+  const [learningStats, setLearningStats] = useState<LearningStats>(EMPTY_STATS);
   const [quiz, setQuiz] = useState<QuizState | null>(null);
   const [answerVisible, setAnswerVisible] = useState(false);
   const [example, setExample] = useState<ExampleSentence | null>(null);
@@ -117,6 +142,15 @@ export default function HomeScreen() {
         const parsed = saved ? (JSON.parse(saved) as WordDeck[]) : STARTER_DECKS;
         if (mounted) {
           setDecks(Array.isArray(parsed) ? parsed : STARTER_DECKS);
+        }
+        const savedStats = await AsyncStorage.getItem(STATS_STORAGE_KEY);
+        if (mounted && savedStats) {
+          const parsedStats = JSON.parse(savedStats) as Partial<LearningStats>;
+          setLearningStats({
+            masteredWords: Array.isArray(parsedStats.masteredWords) ? parsedStats.masteredWords : [],
+            mistakeCounts: parsedStats.mistakeCounts ?? {},
+            mistakeLabels: parsedStats.mistakeLabels ?? {},
+          });
         }
       } catch {
         if (mounted) {
@@ -140,6 +174,20 @@ export default function HomeScreen() {
       void AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(decks));
     }
   }, [decks, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) {
+      void AsyncStorage.setItem(STATS_STORAGE_KEY, JSON.stringify(learningStats));
+    }
+  }, [learningStats, hydrated]);
+
+  const mistakeBook = useMemo(
+    () => Object.entries(learningStats.mistakeCounts)
+      .sort(([, first], [, second]) => second - first)
+      .slice(0, 5)
+      .map(([word, count]) => ({ word: learningStats.mistakeLabels[word] ?? word, count })),
+    [learningStats],
+  );
 
   const selectedDeck = useMemo(
     () => decks.find((deck) => deck.id === selectedDeckId) ?? null,
@@ -190,23 +238,32 @@ export default function HomeScreen() {
     setMinimalWords([]);
     setMinimalInput("");
     setMinimalError("");
+    setMinimalProgress(null);
     setScreen("minimal");
   }
 
-  function addMinimalWord() {
-    const word = minimalInput.trim();
-    if (!word) return;
-    if (!/^[A-Za-z]+(?:[-'][A-Za-z]+)*$/.test(word)) {
-      setMinimalError("請輸入單一英文單字，例如 apple 或 don't。");
+  function addMinimalWords() {
+    const candidates = minimalInput.split(/[\n,，]+/).map((item) => item.trim()).filter(Boolean);
+    if (candidates.length === 0) return;
+    const invalid = candidates.find((word) => !/^[A-Za-z]+(?:[-'][A-Za-z]+)*$/.test(word));
+    if (invalid) {
+      setMinimalError(`「${invalid}」不是有效的英文單字，請用逗號或換行分隔。`);
       return;
     }
-    if (minimalWords.some((item) => item.toLocaleLowerCase("en-US") === word.toLocaleLowerCase("en-US"))) {
-      setMinimalError("這個單字已經在清單裡了。");
+    const existing = new Set(minimalWords.map(normalizeLocalWord));
+    const uniqueWords = candidates.filter((word) => {
+      const normalized = normalizeLocalWord(word);
+      if (existing.has(normalized)) return false;
+      existing.add(normalized);
+      return true;
+    });
+    if (uniqueWords.length === 0) {
+      setMinimalError("這些單字都已經在清單裡了。");
       setMinimalInput("");
       return;
     }
     tapHaptic();
-    setMinimalWords((current) => [...current, word]);
+    setMinimalWords((current) => [...current, ...uniqueWords]);
     setMinimalInput("");
     setMinimalError("");
   }
@@ -219,11 +276,14 @@ export default function HomeScreen() {
     if (minimalWords.length === 0 || minimalResolving) return;
     setMinimalResolving(true);
     setMinimalError("");
+    setMinimalProgress({ current: 0, total: minimalWords.length, word: minimalWords[0] ?? "" });
     try {
       const cards: WordCard[] = [];
-      for (const word of minimalWords) {
+      for (const [index, word] of minimalWords.entries()) {
+        setMinimalProgress({ current: index, total: minimalWords.length, word });
         const result = await resolveWordMutation.mutateAsync({ word });
         cards.push({ id: makeId(), word: result.word, translation: result.translation });
+        setMinimalProgress({ current: index + 1, total: minimalWords.length, word });
       }
       const deck: WordDeck = {
         id: makeId(),
@@ -234,10 +294,12 @@ export default function HomeScreen() {
       setDecks((currentDecks) => [deck, ...currentDecks]);
       setSelectedDeckId(deck.id);
       setMinimalResolving(false);
+      setMinimalProgress(null);
       setScreen("edit");
     } catch {
       setMinimalError("有單字的中文解釋載入失敗，請確認網路後再試。");
       setMinimalResolving(false);
+      setMinimalProgress(null);
     }
   }
 
@@ -397,6 +459,28 @@ export default function HomeScreen() {
     if (!quiz || !currentQuizCard) return;
     tapHaptic();
 
+    const normalized = normalizeLocalWord(currentQuizCard.word);
+    if (known) {
+      setLearningStats((current) => ({
+        ...current,
+        masteredWords: current.masteredWords.includes(normalized)
+          ? current.masteredWords
+          : [...current.masteredWords, normalized],
+      }));
+    } else {
+      setLearningStats((current) => ({
+        ...current,
+        mistakeCounts: {
+          ...current.mistakeCounts,
+          [normalized]: (current.mistakeCounts[normalized] ?? 0) + 1,
+        },
+        mistakeLabels: {
+          ...current.mistakeLabels,
+          [normalized]: currentQuizCard.word,
+        },
+      }));
+    }
+
     if (!known) {
       setQuiz((currentQuiz) => {
         if (!currentQuiz) return currentQuiz;
@@ -516,9 +600,10 @@ export default function HomeScreen() {
         words={minimalWords}
         input={minimalInput}
         loading={minimalResolving}
+        progress={minimalProgress}
         error={minimalError}
         onChangeInput={setMinimalInput}
-        onAddWord={addMinimalWord}
+        onAddWord={addMinimalWords}
         onRemoveWord={removeMinimalWord}
         onFinish={finishMinimalMode}
         onBack={() => setScreen("home")}
@@ -526,13 +611,14 @@ export default function HomeScreen() {
     );
   }
 
-  return <DeckHome decks={decks} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
+  return <DeckHome decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
 }
 
 function MinimalInputScreen({
   words,
   input,
   loading,
+  progress,
   error,
   onChangeInput,
   onAddWord,
@@ -543,6 +629,7 @@ function MinimalInputScreen({
   words: string[];
   input: string;
   loading: boolean;
+  progress: MinimalProgress | null;
   error: string;
   onChangeInput: (value: string) => void;
   onAddWord: () => void;
@@ -570,14 +657,16 @@ function MinimalInputScreen({
                 <MaterialIcons name="short-text" size={23} color="#156D72" />
               </View>
             </View>
-            <Text style={styles.minimalDescription}>只輸入英文單字，按 Enter 連續加入。全部輸入完成後，App 才會一次補齊中文解釋。</Text>
+            <Text style={styles.minimalDescription}>貼上用逗號或換行分隔的一整段英文單字，App 會自動切割；全部輸入完成後才補齊中文解釋。</Text>
             <View style={styles.minimalInputCard}>
               <TextInput
                 value={input}
                 onChangeText={onChangeInput}
                 onSubmitEditing={onAddWord}
+                multiline
+                numberOfLines={3}
                 style={styles.minimalInput}
-                placeholder="例如 apple"
+                placeholder="例如 apple, banana, cat"
                 placeholderTextColor="#9AA9A6"
                 autoCapitalize="none"
                 autoCorrect={false}
@@ -589,6 +678,18 @@ function MinimalInputScreen({
                 <MaterialIcons name="add" size={21} color="#FFFFFF" />
               </Pressable>
             </View>
+            {loading && progress ? (
+              <View style={styles.minimalProgressCard}>
+                <View style={styles.minimalProgressHeader}>
+                  <Text style={styles.minimalProgressTitle}>正在處理第 {Math.min(progress.current + 1, progress.total)} / {progress.total} 個單字</Text>
+                  <Text style={styles.minimalProgressPercent}>{Math.round((progress.current / progress.total) * 100)}%</Text>
+                </View>
+                <View style={styles.minimalProgressTrack}>
+                  <View style={[styles.minimalProgressFill, { width: `${Math.max(5, (progress.current / progress.total) * 100)}%` }]} />
+                </View>
+                <Text style={styles.minimalProgressWord}>目前：{progress.word}</Text>
+              </View>
+            ) : null}
             {error ? <Text style={styles.minimalError}>{error}</Text> : null}
             <View style={styles.minimalSectionHeader}>
               <Text style={styles.cardListTitle}>待建立單字</Text>
@@ -625,12 +726,16 @@ function MinimalInputScreen({
 
 function DeckHome({
   decks,
+  masteredCount,
+  mistakeBook,
   onOpenDeck,
   onCreateDeck,
   onStartQuiz,
   onOpenMinimal,
 }: {
   decks: WordDeck[];
+  masteredCount: number;
+  mistakeBook: { word: string; count: number }[];
   onOpenDeck: (deckId: string) => void;
   onCreateDeck: () => void;
   onStartQuiz: (deck: WordDeck) => void;
@@ -661,6 +766,31 @@ function DeckHome({
             <Text style={styles.homeDescription}>
               建立自己的英文單字集，翻卡後快速判斷。會的離開，不會的繼續回來。
             </Text>
+            <View style={styles.learningStatsCard}>
+              <View style={styles.masteredStatBlock}>
+                <View style={styles.statsIconWrap}>
+                  <MaterialIcons name="auto-awesome" size={19} color="#156D72" />
+                </View>
+                <View>
+                  <Text style={styles.statsLabel}>目前已掌握</Text>
+                  <Text style={styles.masteredNumber}>{masteredCount}</Text>
+                  <Text style={styles.statsUnit}>個單字</Text>
+                </View>
+              </View>
+              <View style={styles.statsDivider} />
+              <View style={styles.mistakeBookBlock}>
+                <View style={styles.mistakeBookHeader}>
+                  <Text style={styles.statsLabel}>易錯記錯本</Text>
+                  <MaterialIcons name="menu-book" size={17} color="#C76739" />
+                </View>
+                {mistakeBook.length > 0 ? mistakeBook.slice(0, 3).map((item) => (
+                  <View style={styles.mistakeRow} key={item.word}>
+                    <Text style={styles.mistakeWord} numberOfLines={1}>{item.word}</Text>
+                    <Text style={styles.mistakeCount}>不會 {item.count} 次</Text>
+                  </View>
+                )) : <Text style={styles.emptyMistakeText}>完成幾次分類後，易錯單字會出現在這裡。</Text>}
+              </View>
+            </View>
             <View style={styles.sectionHeading}>
               <Text style={styles.sectionTitle}>我的單字集</Text>
               <Text style={styles.sectionHint}>{decks.length} 組</Text>
@@ -1191,6 +1321,47 @@ const styles = StyleSheet.create({
     color: "#173937",
     fontSize: 17,
     fontWeight: "700",
+    minHeight: 46,
+    paddingTop: 11,
+    paddingBottom: 11,
+  },
+  minimalProgressCard: {
+    marginTop: 12,
+    padding: 14,
+    borderRadius: 16,
+    backgroundColor: "#E9F5F1",
+  },
+  minimalProgressHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  minimalProgressTitle: {
+    color: "#1B4948",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  minimalProgressPercent: {
+    color: "#156D72",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  minimalProgressTrack: {
+    height: 8,
+    marginTop: 10,
+    borderRadius: 5,
+    overflow: "hidden",
+    backgroundColor: "#C7E2DB",
+  },
+  minimalProgressFill: {
+    height: "100%",
+    borderRadius: 5,
+    backgroundColor: "#156D72",
+  },
+  minimalProgressWord: {
+    color: "#5E807B",
+    fontSize: 11,
+    marginTop: 7,
   },
   minimalAddButton: {
     width: 46,
@@ -1325,6 +1496,86 @@ const styles = StyleSheet.create({
     lineHeight: 23,
     marginTop: 14,
     maxWidth: 330,
+  },
+  learningStatsCard: {
+    marginTop: 22,
+    padding: 14,
+    borderRadius: 20,
+    flexDirection: "row",
+    backgroundColor: "#FFFFFF",
+    borderWidth: 1,
+    borderColor: "#E2E9E4",
+  },
+  masteredStatBlock: {
+    width: 112,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 9,
+  },
+  statsIconWrap: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#E9F5F1",
+  },
+  statsLabel: {
+    color: "#71817E",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  masteredNumber: {
+    color: "#173937",
+    fontSize: 23,
+    lineHeight: 25,
+    fontWeight: "900",
+  },
+  statsUnit: {
+    position: "absolute",
+    left: 43,
+    top: 35,
+    color: "#7A918E",
+    fontSize: 9,
+  },
+  statsDivider: {
+    width: 1,
+    marginHorizontal: 12,
+    backgroundColor: "#E6ECE7",
+  },
+  mistakeBookBlock: {
+    flex: 1,
+    minWidth: 0,
+  },
+  mistakeBookHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 5,
+  },
+  mistakeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    paddingVertical: 2,
+  },
+  mistakeWord: {
+    flex: 1,
+    color: "#365D56",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  mistakeCount: {
+    color: "#C76739",
+    fontSize: 10,
+    fontWeight: "800",
+  },
+  emptyMistakeText: {
+    color: "#8A9A95",
+    fontSize: 10,
+    lineHeight: 15,
+    marginTop: 2,
   },
   sectionHeading: {
     flexDirection: "row",
