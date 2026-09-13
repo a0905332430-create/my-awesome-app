@@ -3,8 +3,8 @@ import * as Api from "@/lib/_core/api";
 import * as Auth from "@/lib/_core/auth";
 import * as Linking from "expo-linking";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useState } from "react";
-import { ActivityIndicator, Text } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Platform, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function OAuthCallback() {
@@ -18,9 +18,11 @@ export default function OAuthCallback() {
   }>();
   const [status, setStatus] = useState<"processing" | "success" | "error">("processing");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const handledRef = useRef(false);
 
   useEffect(() => {
-    const handleCallback = async () => {
+    const handleCallback = async (callbackUrl?: string) => {
+      if (handledRef.current) return;
       console.log("[OAuth] Callback handler triggered");
       console.log("[OAuth] Params received:", {
         code: params.code,
@@ -68,10 +70,10 @@ export default function OAuthCallback() {
         }
 
         // Get URL from params or Linking
-        let url: string | null = null;
+        let url: string | null = callbackUrl ?? null;
 
         // Try to get from local search params first (works with expo-router)
-        if (params.code || params.state || params.error) {
+        if (!url && (params.code || params.state || params.error)) {
           console.log("[OAuth] Found params in route params");
           // Extract from params
           const urlParams = new URLSearchParams();
@@ -80,7 +82,7 @@ export default function OAuthCallback() {
           if (params.error) urlParams.set("error", params.error);
           url = `?${urlParams.toString()}`;
           console.log("[OAuth] Constructed URL from params:", url);
-        } else {
+        } else if (!url) {
           console.log("[OAuth] No params found, checking Linking.getInitialURL()...");
           // Fallback: try to get from Linking
           const initialUrl = await Linking.getInitialURL();
@@ -94,6 +96,7 @@ export default function OAuthCallback() {
         const error =
           params.error || (url ? new URL(url, "http://dummy").searchParams.get("error") : null);
         if (error) {
+          handledRef.current = true;
           console.error("[OAuth] Error parameter found:", error);
           setStatus("error");
           setErrorMessage(error || "OAuth error occurred");
@@ -166,6 +169,11 @@ export default function OAuthCallback() {
 
         // Otherwise, exchange code for session token
         if (!code || !state) {
+          if (Platform.OS !== "web" && !callbackUrl && !params.code && !params.state) {
+            console.log("[OAuth] Waiting for native deep-link URL event...");
+            return;
+          }
+          handledRef.current = true;
           console.error("[OAuth] Missing code or state parameter", {
             hasCode: !!code,
             hasState: !!state,
@@ -174,6 +182,8 @@ export default function OAuthCallback() {
           setErrorMessage("Missing code or state parameter");
           return;
         }
+
+        handledRef.current = true;
 
         // Exchange code for session token
         console.log("[OAuth] Exchanging code for session token...", {
@@ -231,7 +241,11 @@ export default function OAuthCallback() {
       }
     };
 
-    handleCallback();
+    void handleCallback();
+    const subscription = Linking.addEventListener("url", ({ url }) => {
+      void handleCallback(url);
+    });
+    return () => subscription.remove();
   }, [params.code, params.state, params.error, params.sessionToken, params.user, router]);
 
   return (
