@@ -15,6 +15,8 @@ import {
 } from "react-native";
 
 import { ScreenContainer } from "@/components/screen-container";
+import { startOAuthLogin } from "@/constants/oauth";
+import { useAuth } from "@/hooks/use-auth";
 import { trpc } from "@/lib/trpc";
 
 type WordCard = {
@@ -112,6 +114,7 @@ const EMPTY_STATS: LearningStats = {
 };
 
 export default function HomeScreen() {
+  const { user, loading: authLoading, isAuthenticated, logout } = useAuth();
   const [decks, setDecks] = useState<WordDeck[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const [screen, setScreen] = useState<Screen>("home");
@@ -203,6 +206,14 @@ export default function HomeScreen() {
     () => activeQuizDeck?.cards.find((card) => card.id === quiz?.currentCardId) ?? null,
     [activeQuizDeck, quiz?.currentCardId],
   );
+
+  if (authLoading) {
+    return <AuthLoadingScreen />;
+  }
+
+  if (!isAuthenticated) {
+    return <LoginScreen onLogin={() => void startOAuthLogin()} />;
+  }
 
   function updateDeck(deckId: string, updater: (deck: WordDeck) => WordDeck) {
     setDecks((currentDecks) =>
@@ -611,7 +622,38 @@ export default function HomeScreen() {
     );
   }
 
-  return <DeckHome decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
+  return <DeckHome userName={user?.name ?? user?.email ?? "學習者"} onLogout={() => void logout()} decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
+}
+
+function AuthLoadingScreen() {
+  return (
+    <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.screen}>
+      <View style={styles.loadingScreen}>
+        <View style={styles.loadingMark}><Text style={styles.loadingMarkText}>V</Text></View>
+        <Text style={styles.loadingTitle}>Vocab Loop</Text>
+        <Text style={styles.loadingSubtitle}>正在確認登入狀態</Text>
+      </View>
+    </ScreenContainer>
+  );
+}
+
+function LoginScreen({ onLogin }: { onLogin: () => void }) {
+  return (
+    <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.screen}>
+      <View style={styles.loginScreen}>
+        <View style={styles.loginBrandMark}><Text style={styles.loadingMarkText}>V</Text></View>
+        <Text style={styles.loginEyebrow}>VOCAB LOOP</Text>
+        <Text style={styles.loginTitle}>把每一次練習，{`\n`}留在你的帳號裡。</Text>
+        <Text style={styles.loginDescription}>登入後即可保存學習進度，未來也能在不同裝置繼續使用你的單字集。</Text>
+        <Pressable onPress={onLogin} style={({ pressed }) => [styles.loginButton, pressed && styles.pressed]} accessibilityLabel="註冊或登入">
+          <MaterialIcons name="login" size={20} color="#FFFFFF" />
+          <Text style={styles.loginButtonText}>註冊／登入</Text>
+          <MaterialIcons name="arrow-forward" size={18} color="#FFFFFF" />
+        </Pressable>
+        <Text style={styles.loginHint}>使用安全的 Manus 帳戶驗證，不在 App 內保存密碼。</Text>
+      </View>
+    </ScreenContainer>
+  );
 }
 
 function MinimalInputScreen({
@@ -725,6 +767,8 @@ function MinimalInputScreen({
 }
 
 function DeckHome({
+  userName,
+  onLogout,
   decks,
   masteredCount,
   mistakeBook,
@@ -733,6 +777,8 @@ function DeckHome({
   onStartQuiz,
   onOpenMinimal,
 }: {
+  userName: string;
+  onLogout: () => void;
   decks: WordDeck[];
   masteredCount: number;
   mistakeBook: { word: string; count: number }[];
@@ -757,11 +803,17 @@ function DeckHome({
                 </View>
                 <Text style={styles.brandName}>VOCAB LOOP</Text>
               </View>
-              <Pressable onPress={onOpenMinimal} style={({ pressed }) => [styles.minimalHomeButton, pressed && styles.pressed]} accessibilityLabel="開啟極簡輸入模式">
-                <MaterialIcons name="short-text" size={18} color="#156D72" />
-                <Text style={styles.minimalHomeButtonText}>極簡輸入</Text>
-              </Pressable>
+              <View style={styles.homeActions}>
+                <Pressable onPress={onOpenMinimal} style={({ pressed }) => [styles.minimalHomeButton, pressed && styles.pressed]} accessibilityLabel="開啟極簡輸入模式">
+                  <MaterialIcons name="short-text" size={18} color="#156D72" />
+                  <Text style={styles.minimalHomeButtonText}>極簡輸入</Text>
+                </Pressable>
+                <Pressable onPress={onLogout} style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]} accessibilityLabel={`登出 ${userName}`}>
+                  <MaterialIcons name="logout" size={17} color="#C4544D" />
+                </Pressable>
+              </View>
             </View>
+            <Text style={styles.welcomeText}>嗨，{userName}</Text>
             <Text style={styles.homeTitle}>把記不住的，{`\n`}留在下一張。</Text>
             <Text style={styles.homeDescription}>
               建立自己的英文單字集，翻卡後快速判斷。會的離開，不會的繼續回來。
@@ -1260,6 +1312,68 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 6,
   },
+  loginScreen: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 28,
+    backgroundColor: "#FBF8F1",
+  },
+  loginBrandMark: {
+    width: 68,
+    height: 68,
+    borderRadius: 22,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#156D72",
+    marginBottom: 17,
+  },
+  loginEyebrow: {
+    color: "#7A918E",
+    fontSize: 11,
+    fontWeight: "900",
+    letterSpacing: 1.7,
+  },
+  loginTitle: {
+    color: "#173937",
+    fontSize: 31,
+    lineHeight: 39,
+    fontWeight: "800",
+    letterSpacing: -0.8,
+    textAlign: "center",
+    marginTop: 14,
+  },
+  loginDescription: {
+    maxWidth: 340,
+    color: "#637673",
+    fontSize: 15,
+    lineHeight: 23,
+    textAlign: "center",
+    marginTop: 14,
+  },
+  loginButton: {
+    width: "100%",
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
+    borderRadius: 18,
+    backgroundColor: "#173937",
+    marginTop: 28,
+  },
+  loginButtonText: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+  loginHint: {
+    color: "#8A9A95",
+    fontSize: 11,
+    lineHeight: 17,
+    textAlign: "center",
+    marginTop: 14,
+  },
   homeList: {
     paddingHorizontal: 20,
     paddingBottom: 18,
@@ -1443,6 +1557,25 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 9,
     marginBottom: 31,
+  },
+  homeActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+  },
+  logoutButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FBE9E5",
+  },
+  welcomeText: {
+    color: "#55716C",
+    fontSize: 13,
+    fontWeight: "700",
+    marginBottom: 3,
   },
   brandIdentity: {
     flexDirection: "row",
