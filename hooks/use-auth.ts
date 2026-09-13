@@ -6,6 +6,22 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const GUEST_MODE_KEY = "vocab-loop.guest-mode.v1";
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("登入狀態檢查逾時，請稍後重試。")), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (reason) => {
+        clearTimeout(timer);
+        reject(reason);
+      },
+    );
+  });
+}
+
 type UseAuthOptions = {
   autoFetch?: boolean;
 };
@@ -23,7 +39,7 @@ export function useAuth(options?: UseAuthOptions) {
       setLoading(true);
       setError(null);
 
-      if (await AsyncStorage.getItem(GUEST_MODE_KEY) === "true") {
+      if (await withTimeout(AsyncStorage.getItem(GUEST_MODE_KEY), 4000) === "true") {
         setIsGuest(true);
         setUser(null);
         return;
@@ -32,7 +48,7 @@ export function useAuth(options?: UseAuthOptions) {
       // Web platform: use cookie-based auth, fetch user from API
       if (Platform.OS === "web") {
         console.log("[useAuth] Web platform: fetching user from API...");
-        const apiUser = await Api.getMe();
+        const apiUser = await withTimeout(Api.getMe(), 8000);
         console.log("[useAuth] API user response:", apiUser);
 
         if (apiUser) {
@@ -59,7 +75,7 @@ export function useAuth(options?: UseAuthOptions) {
 
       // Native platform: use token-based auth
       console.log("[useAuth] Native platform: checking for session token...");
-      const sessionToken = await Auth.getSessionToken();
+      const sessionToken = await withTimeout(Auth.getSessionToken(), 4000);
       console.log(
         "[useAuth] Session token:",
         sessionToken ? `present (${sessionToken.substring(0, 20)}...)` : "missing",
@@ -71,7 +87,7 @@ export function useAuth(options?: UseAuthOptions) {
       }
 
       // Use cached user info for native (token validates the session)
-      const cachedUser = await Auth.getUserInfo();
+      const cachedUser = await withTimeout(Auth.getUserInfo(), 4000);
       console.log("[useAuth] Cached user:", cachedUser);
       if (cachedUser) {
         console.log("[useAuth] Using cached user info");
@@ -92,15 +108,21 @@ export function useAuth(options?: UseAuthOptions) {
   }, []);
 
   const logout = useCallback(async () => {
+    // Clear local credentials independently of the network so APK logout is immediate.
+    const clearLocalSession = async () => {
+      await Promise.allSettled([
+        withTimeout(Auth.removeSessionToken(), 4000),
+        withTimeout(Auth.clearUserInfo(), 4000),
+        withTimeout(AsyncStorage.removeItem(GUEST_MODE_KEY), 4000),
+      ]);
+    };
     try {
-      await Api.logout();
+      await withTimeout(Api.logout(), 5000);
     } catch (err) {
       console.error("[Auth] Logout API call failed:", err);
       // Continue with logout even if API call fails
     } finally {
-      await Auth.removeSessionToken();
-      await Auth.clearUserInfo();
-      await AsyncStorage.removeItem(GUEST_MODE_KEY);
+      await clearLocalSession();
       setIsGuest(false);
       setUser(null);
       setError(null);
@@ -108,9 +130,11 @@ export function useAuth(options?: UseAuthOptions) {
   }, []);
 
   const continueAsGuest = useCallback(async () => {
-    await AsyncStorage.setItem(GUEST_MODE_KEY, "true");
-    await Auth.removeSessionToken();
-    await Auth.clearUserInfo();
+    await Promise.allSettled([
+      withTimeout(AsyncStorage.setItem(GUEST_MODE_KEY, "true"), 4000),
+      withTimeout(Auth.removeSessionToken(), 4000),
+      withTimeout(Auth.clearUserInfo(), 4000),
+    ]);
     setIsGuest(true);
     setUser(null);
     setError(null);
@@ -121,32 +145,9 @@ export function useAuth(options?: UseAuthOptions) {
   useEffect(() => {
     console.log("[useAuth] useEffect triggered, autoFetch:", autoFetch, "platform:", Platform.OS);
     if (autoFetch) {
-      if (Platform.OS === "web") {
-        // Web: fetch user from API directly (user will login manually if needed)
-        console.log("[useAuth] Web: fetching user from API...");
-        fetchUser();
-      } else {
-        // Native: check for cached user info first for faster initial load
-          AsyncStorage.getItem(GUEST_MODE_KEY).then((guestMode) => {
-            if (guestMode === "true") {
-              setIsGuest(true);
-              setLoading(false);
-              return null;
-            }
-            return Auth.getUserInfo();
-          }).then((cachedUser) => {
-            if (!cachedUser) return;
-            console.log("[useAuth] Native cached user check:", cachedUser);
-          if (cachedUser) {
-            console.log("[useAuth] Native: setting cached user immediately");
-            setUser(cachedUser);
-            setLoading(false);
-          } else {
-            // No cached user, check session token
-            fetchUser();
-          }
-        });
-      }
+      // Use one guarded path on web and native so every rejection reaches
+      // fetchUser's finally block and can never leave the splash state stuck.
+      void fetchUser();
     } else {
       console.log("[useAuth] autoFetch disabled, setting loading to false");
       setLoading(false);
