@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
+import { useRouter } from "expo-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
@@ -114,6 +115,7 @@ const EMPTY_STATS: LearningStats = {
 };
 
 export default function HomeScreen() {
+  const router = useRouter();
   const { user, loading: authLoading, isAuthenticated, isGuest, continueAsGuest, logout } = useAuth();
   const [decks, setDecks] = useState<WordDeck[]>([]);
   const [hydrated, setHydrated] = useState(false);
@@ -649,7 +651,7 @@ export default function HomeScreen() {
     );
   }
 
-  return <DeckHome userName={isGuest ? "游客" : user?.name ?? user?.email ?? "學習者"} onLogout={() => void logout()} decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
+  return <DeckHome userName={isGuest ? "游客" : user?.name ?? user?.email ?? "學習者"} isAdmin={user?.role === "admin"} onOpenAdmin={() => router.push("/admin")} onLogout={() => void logout()} decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
 }
 
 function AuthLoadingScreen() {
@@ -800,6 +802,8 @@ function MinimalInputScreen({
 
 function DeckHome({
   userName,
+  isAdmin,
+  onOpenAdmin,
   onLogout,
   decks,
   masteredCount,
@@ -810,6 +814,8 @@ function DeckHome({
   onOpenMinimal,
 }: {
   userName: string;
+  isAdmin: boolean;
+  onOpenAdmin: () => void;
   onLogout: () => void;
   decks: WordDeck[];
   masteredCount: number;
@@ -840,6 +846,9 @@ function DeckHome({
                   <MaterialIcons name="short-text" size={18} color="#156D72" />
                   <Text style={styles.minimalHomeButtonText}>極簡輸入</Text>
                 </Pressable>
+                {isAdmin ? <Pressable onPress={onOpenAdmin} style={({ pressed }) => [styles.adminButton, pressed && styles.pressed]} accessibilityLabel="開啟管理員頁面">
+                  <MaterialIcons name="admin-panel-settings" size={17} color="#156D72" />
+                </Pressable> : null}
                 <Pressable onPress={onLogout} style={({ pressed }) => [styles.logoutButton, pressed && styles.pressed]} accessibilityLabel={`登出 ${userName}`}>
                   <MaterialIcons name="logout" size={17} color="#C4544D" />
                 </Pressable>
@@ -1625,6 +1634,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#FBE9E5",
+  },
+  adminButton: {
+    width: 34,
+    height: 34,
+    borderRadius: 11,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#E8F1EE",
   },
   welcomeText: {
     color: "#55716C",

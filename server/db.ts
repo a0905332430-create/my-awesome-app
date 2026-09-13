@@ -68,6 +68,37 @@ export async function getUserByOpenId(openId: string): Promise<User | undefined>
   return result[0];
 }
 
+export async function listUsersWithVocabulary() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select({ user: users, vocabulary: userVocabularyData })
+    .from(users)
+    .leftJoin(userVocabularyData, eq(users.openId, userVocabularyData.userOpenId));
+}
+
+export async function updateUserProfile(input: {
+  openId: string;
+  name?: string | null;
+  email?: string | null;
+  role?: "user" | "admin";
+}) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(users).set({
+    ...(input.name !== undefined ? { name: input.name } : {}),
+    ...(input.email !== undefined ? { email: input.email } : {}),
+    ...(input.role !== undefined ? { role: input.role } : {}),
+    updatedAt: new Date(),
+  }).where(eq(users.openId, input.openId));
+}
+
+export async function deleteUserAndVocabulary(openId: string) {
+  const db = await getDb();
+  if (!db) return;
+  await db.delete(userVocabularyData).where(eq(userVocabularyData.userOpenId, openId));
+  await db.delete(users).where(eq(users.openId, openId));
+}
+
 export function normalizeWord(word: string) {
   return word.trim().toLocaleLowerCase("en-US");
 }

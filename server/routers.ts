@@ -3,9 +3,17 @@ import { COOKIE_NAME } from "../shared/const.js";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { TRPCError } from "@trpc/server";
 import { systemRouter } from "./_core/systemRouter";
-import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
+import { adminProcedure, protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { generateExampleSentence, generateWordTranslation } from "./exampleGeneration";
-import { getCachedWord, getUserVocabularyData, upsertCachedWord, upsertUserVocabularyData } from "./db";
+import {
+  deleteUserAndVocabulary,
+  getCachedWord,
+  getUserVocabularyData,
+  listUsersWithVocabulary,
+  updateUserProfile,
+  upsertCachedWord,
+  upsertUserVocabularyData,
+} from "./db";
 
 const wordInput = z.object({
   word: z.string().trim().min(1).max(80),
@@ -57,6 +65,45 @@ export const appRouter = router({
         });
         return { success: true as const };
       }),
+  }),
+
+  admin: router({
+    users: router({
+      list: adminProcedure.query(async () => {
+        const rows = await listUsersWithVocabulary();
+        return rows.map(({ user, vocabulary }) => ({
+          id: user.id,
+          openId: user.openId,
+          name: user.name,
+          email: user.email,
+          loginMethod: user.loginMethod,
+          role: user.role,
+          createdAt: user.createdAt,
+          lastSignedIn: user.lastSignedIn,
+          updatedAt: user.updatedAt,
+          decks: vocabulary ? JSON.parse(vocabulary.decksJson) : [],
+          learningStats: vocabulary ? JSON.parse(vocabulary.statsJson) : null,
+        }));
+      }),
+      update: adminProcedure
+        .input(z.object({ openId: z.string().min(1), name: z.string().trim().max(200).nullable().optional(), email: z.string().email().nullable().optional(), role: z.enum(["user", "admin"]).optional() }))
+        .mutation(async ({ ctx, input }) => {
+          if (ctx.user.openId === input.openId && input.role === "user") {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "不能移除目前登入管理員的管理權限。" });
+          }
+          await updateUserProfile(input);
+          return { success: true as const };
+        }),
+      remove: adminProcedure
+        .input(z.object({ openId: z.string().min(1) }))
+        .mutation(async ({ ctx, input }) => {
+          if (ctx.user.openId === input.openId) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "不能刪除目前登入的管理員帳戶。" });
+          }
+          await deleteUserAndVocabulary(input.openId);
+          return { success: true as const };
+        }),
+    }),
   }),
 
   words: router({
