@@ -2,7 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import MaterialIcons from "@expo/vector-icons/MaterialIcons";
 import * as Haptics from "expo-haptics";
 import * as Speech from "expo-speech";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   FlatList,
@@ -114,7 +114,7 @@ const EMPTY_STATS: LearningStats = {
 };
 
 export default function HomeScreen() {
-  const { user, loading: authLoading, isAuthenticated, logout } = useAuth();
+  const { user, loading: authLoading, isAuthenticated, isGuest, continueAsGuest, logout } = useAuth();
   const [decks, setDecks] = useState<WordDeck[]>([]);
   const [hydrated, setHydrated] = useState(false);
   const [screen, setScreen] = useState<Screen>("home");
@@ -135,6 +135,9 @@ export default function HomeScreen() {
   const [lastExampleSentence, setLastExampleSentence] = useState("");
   const exampleMutation = trpc.examples.generate.useMutation();
   const resolveWordMutation = trpc.words.resolve.useMutation();
+  const syncUserDataMutation = trpc.userData.sync.useMutation();
+  const saveUserDataMutation = trpc.userData.save.useMutation();
+  const syncedFromServerRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
@@ -184,6 +187,30 @@ export default function HomeScreen() {
     }
   }, [learningStats, hydrated]);
 
+  useEffect(() => {
+    if (!hydrated || !isAuthenticated || isGuest || syncedFromServerRef.current) return;
+    syncedFromServerRef.current = true;
+    syncUserDataMutation.mutate(
+      { decks, learningStats },
+      {
+        onSuccess: (remote) => {
+          if (remote.source === "remote") {
+            setDecks(remote.decks as WordDeck[]);
+            setLearningStats(remote.learningStats as LearningStats);
+          }
+        },
+        onError: () => {
+          syncedFromServerRef.current = false;
+        },
+      },
+    );
+  }, [decks, hydrated, isAuthenticated, isGuest, learningStats, syncUserDataMutation]);
+
+  useEffect(() => {
+    if (!hydrated || !isAuthenticated || isGuest || !syncedFromServerRef.current) return;
+    void saveUserDataMutation.mutateAsync({ decks, learningStats });
+  }, [decks, hydrated, isAuthenticated, isGuest, learningStats, saveUserDataMutation]);
+
   const mistakeBook = useMemo(
     () => Object.entries(learningStats.mistakeCounts)
       .sort(([, first], [, second]) => second - first)
@@ -212,7 +239,7 @@ export default function HomeScreen() {
   }
 
   if (!isAuthenticated) {
-    return <LoginScreen onLogin={() => void startOAuthLogin()} />;
+    return <LoginScreen onLogin={() => void startOAuthLogin()} onGuest={() => void continueAsGuest()} />;
   }
 
   function updateDeck(deckId: string, updater: (deck: WordDeck) => WordDeck) {
@@ -622,7 +649,7 @@ export default function HomeScreen() {
     );
   }
 
-  return <DeckHome userName={user?.name ?? user?.email ?? "學習者"} onLogout={() => void logout()} decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
+  return <DeckHome userName={isGuest ? "游客" : user?.name ?? user?.email ?? "學習者"} onLogout={() => void logout()} decks={decks} masteredCount={learningStats.masteredWords.length} mistakeBook={mistakeBook} onOpenDeck={openDeck} onCreateDeck={createDeck} onStartQuiz={startQuiz} onOpenMinimal={openMinimalMode} />;
 }
 
 function AuthLoadingScreen() {
@@ -637,7 +664,7 @@ function AuthLoadingScreen() {
   );
 }
 
-function LoginScreen({ onLogin }: { onLogin: () => void }) {
+function LoginScreen({ onLogin, onGuest }: { onLogin: () => void; onGuest: () => void }) {
   return (
     <ScreenContainer edges={["top", "bottom", "left", "right"]} style={styles.screen}>
       <View style={styles.loginScreen}>
@@ -650,6 +677,11 @@ function LoginScreen({ onLogin }: { onLogin: () => void }) {
           <Text style={styles.loginButtonText}>註冊／登入</Text>
           <MaterialIcons name="arrow-forward" size={18} color="#FFFFFF" />
         </Pressable>
+        <Pressable onPress={onGuest} style={({ pressed }) => [styles.guestButton, pressed && styles.pressed]} accessibilityLabel="游客登入">
+          <MaterialIcons name="visibility" size={19} color="#156D72" />
+          <Text style={styles.guestButtonText}>游客登入，先試用看看</Text>
+        </Pressable>
+        <Text style={styles.guestHint}>游客資料只保存在本機，不會同步到資料庫</Text>
         <Text style={styles.loginHint}>使用安全的 Manus 帳戶驗證，不在 App 內保存密碼。</Text>
       </View>
     </ScreenContainer>
@@ -1366,6 +1398,29 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
     fontSize: 16,
     fontWeight: "800",
+  },
+  guestButton: {
+    width: "100%",
+    minHeight: 52,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: 17,
+    borderWidth: 1,
+    borderColor: "#B9D2CD",
+    backgroundColor: "#FFFFFF",
+    marginTop: 10,
+  },
+  guestButtonText: {
+    color: "#156D72",
+    fontSize: 15,
+    fontWeight: "800",
+  },
+  guestHint: {
+    color: "#8A9A95",
+    fontSize: 11,
+    marginTop: 8,
   },
   loginHint: {
     color: "#8A9A95",

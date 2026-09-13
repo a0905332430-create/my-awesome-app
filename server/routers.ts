@@ -3,9 +3,9 @@ import { COOKIE_NAME } from "../shared/const.js";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { TRPCError } from "@trpc/server";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { generateExampleSentence, generateWordTranslation } from "./exampleGeneration";
-import { getCachedWord, upsertCachedWord } from "./db";
+import { getCachedWord, getUserVocabularyData, upsertCachedWord, upsertUserVocabularyData } from "./db";
 
 const wordInput = z.object({
   word: z.string().trim().min(1).max(80),
@@ -21,6 +21,42 @@ export const appRouter = router({
       ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 });
       return { success: true } as const;
     }),
+  }),
+
+  userData: router({
+    sync: protectedProcedure
+      .input(z.object({ decks: z.array(z.unknown()), learningStats: z.record(z.string(), z.unknown()) }))
+      .mutation(async ({ ctx, input }) => {
+        const remote = await getUserVocabularyData(ctx.user.openId);
+        if (remote) {
+          try {
+            return {
+              source: "remote" as const,
+              decks: JSON.parse(remote.decksJson) as unknown[],
+              learningStats: JSON.parse(remote.statsJson) as Record<string, unknown>,
+            };
+          } catch {
+            // Replace malformed legacy data with the validated local snapshot below.
+          }
+        }
+
+        await upsertUserVocabularyData({
+          userOpenId: ctx.user.openId,
+          decksJson: JSON.stringify(input.decks),
+          statsJson: JSON.stringify(input.learningStats),
+        });
+        return { source: "local" as const, decks: input.decks, learningStats: input.learningStats };
+      }),
+    save: protectedProcedure
+      .input(z.object({ decks: z.array(z.unknown()), learningStats: z.record(z.string(), z.unknown()) }))
+      .mutation(async ({ ctx, input }) => {
+        await upsertUserVocabularyData({
+          userOpenId: ctx.user.openId,
+          decksJson: JSON.stringify(input.decks),
+          statsJson: JSON.stringify(input.learningStats),
+        });
+        return { success: true as const };
+      }),
   }),
 
   words: router({

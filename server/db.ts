@@ -1,6 +1,16 @@
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, InsertWordCache, User, users, WordCache, wordCache } from "../drizzle/schema";
+import {
+  InsertUser,
+  InsertUserVocabularyData,
+  InsertWordCache,
+  User,
+  users,
+  UserVocabularyData,
+  userVocabularyData,
+  WordCache,
+  wordCache,
+} from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -99,4 +109,33 @@ export async function upsertCachedWord(input: {
     set: updateSet,
   });
   return getCachedWord(input.word);
+}
+
+export async function getUserVocabularyData(userOpenId: string): Promise<UserVocabularyData | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(userVocabularyData).where(eq(userVocabularyData.userOpenId, userOpenId)).limit(1);
+  return result[0];
+}
+
+export async function upsertUserVocabularyData(input: {
+  userOpenId: string;
+  decksJson: string;
+  statsJson: string;
+}): Promise<UserVocabularyData | undefined> {
+  const db = await getDb();
+  if (!db) return undefined;
+  const values: InsertUserVocabularyData = {
+    userOpenId: input.userOpenId,
+    decksJson: input.decksJson,
+    statsJson: input.statsJson,
+  };
+  await db.insert(userVocabularyData).values(values).onDuplicateKeyUpdate({
+    set: {
+      decksJson: input.decksJson,
+      statsJson: input.statsJson,
+      updatedAt: new Date(),
+    },
+  });
+  return getUserVocabularyData(input.userOpenId);
 }

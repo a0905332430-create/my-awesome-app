@@ -2,6 +2,9 @@ import * as Api from "@/lib/_core/api";
 import * as Auth from "@/lib/_core/auth";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+const GUEST_MODE_KEY = "vocab-loop.guest-mode.v1";
 
 type UseAuthOptions = {
   autoFetch?: boolean;
@@ -12,12 +15,19 @@ export function useAuth(options?: UseAuthOptions) {
   const [user, setUser] = useState<Auth.User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const [isGuest, setIsGuest] = useState(false);
 
   const fetchUser = useCallback(async () => {
     console.log("[useAuth] fetchUser called");
     try {
       setLoading(true);
       setError(null);
+
+      if (await AsyncStorage.getItem(GUEST_MODE_KEY) === "true") {
+        setIsGuest(true);
+        setUser(null);
+        return;
+      }
 
       // Web platform: use cookie-based auth, fetch user from API
       if (Platform.OS === "web") {
@@ -89,12 +99,23 @@ export function useAuth(options?: UseAuthOptions) {
     } finally {
       await Auth.removeSessionToken();
       await Auth.clearUserInfo();
+      await AsyncStorage.removeItem(GUEST_MODE_KEY);
+      setIsGuest(false);
       setUser(null);
       setError(null);
     }
   }, []);
 
-  const isAuthenticated = useMemo(() => Boolean(user), [user]);
+  const continueAsGuest = useCallback(async () => {
+    await AsyncStorage.setItem(GUEST_MODE_KEY, "true");
+    await Auth.removeSessionToken();
+    await Auth.clearUserInfo();
+    setIsGuest(true);
+    setUser(null);
+    setError(null);
+  }, []);
+
+  const isAuthenticated = useMemo(() => Boolean(user) || isGuest, [user, isGuest]);
 
   useEffect(() => {
     console.log("[useAuth] useEffect triggered, autoFetch:", autoFetch, "platform:", Platform.OS);
@@ -105,8 +126,16 @@ export function useAuth(options?: UseAuthOptions) {
         fetchUser();
       } else {
         // Native: check for cached user info first for faster initial load
-        Auth.getUserInfo().then((cachedUser) => {
-          console.log("[useAuth] Native cached user check:", cachedUser);
+          AsyncStorage.getItem(GUEST_MODE_KEY).then((guestMode) => {
+            if (guestMode === "true") {
+              setIsGuest(true);
+              setLoading(false);
+              return null;
+            }
+            return Auth.getUserInfo();
+          }).then((cachedUser) => {
+            if (!cachedUser) return;
+            console.log("[useAuth] Native cached user check:", cachedUser);
           if (cachedUser) {
             console.log("[useAuth] Native: setting cached user immediately");
             setUser(cachedUser);
@@ -134,6 +163,8 @@ export function useAuth(options?: UseAuthOptions) {
 
   return {
     user,
+    isGuest,
+    continueAsGuest,
     loading,
     error,
     isAuthenticated,

@@ -15,6 +15,13 @@
       "when": 1789140108760,
       "tag": "0001_strange_hellion",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1789317765146,
+      "tag": "0002_damp_amphibian",
+      "breakpoints": true
     }
   ]
 }
