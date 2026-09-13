@@ -9,6 +9,15 @@ function getQueryParam(req: Request, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function decodeNativeRedirect(state: string): string | null {
+  try {
+    const decoded = Buffer.from(state, "base64").toString("utf8");
+    return /^manus[a-z0-9]*:\/\//i.test(decoded) ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
 async function syncUser(userInfo: {
   openId?: string | null;
   name?: string | null;
@@ -125,6 +134,37 @@ export function registerOAuthRoutes(app: Express) {
     } catch (error) {
       console.error("[OAuth] Mobile exchange failed", error);
       res.status(500).json({ error: "OAuth mobile exchange failed" });
+    }
+  });
+
+  // Native OAuth bridge: exchange the authorization code on the server,
+  // then return only the app session to the manus* deep link.
+  app.get("/api/oauth/mobile/callback", async (req: Request, res: Response) => {
+    const code = getQueryParam(req, "code");
+    const state = getQueryParam(req, "state");
+    const redirectUri = state ? decodeNativeRedirect(state) : null;
+
+    if (!code || !state || !redirectUri) {
+      res.status(400).json({ error: "code, state and a valid native redirect are required" });
+      return;
+    }
+
+    try {
+      const tokenResponse = await sdk.exchangeCodeForToken(code, state);
+      const userInfo = await sdk.getUserInfo(tokenResponse.accessToken);
+      const user = await syncUser(userInfo);
+      const sessionToken = await sdk.createSessionToken(userInfo.openId!, {
+        name: userInfo.name || "",
+        expiresInMs: ONE_YEAR_MS,
+      });
+      const userParam = Buffer.from(JSON.stringify(buildUserResponse(user)), "utf8").toString("base64");
+      const callback = new URL(redirectUri);
+      callback.searchParams.set("sessionToken", sessionToken);
+      callback.searchParams.set("user", userParam);
+      res.redirect(302, callback.toString());
+    } catch (error) {
+      console.error("[OAuth] Native callback bridge failed", error);
+      res.status(500).json({ error: "OAuth native callback failed" });
     }
   });
 

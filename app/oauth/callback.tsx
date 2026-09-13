@@ -7,6 +7,39 @@ import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Platform, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
+function parseOAuthParams(value: string | null) {
+  if (!value) return new URLSearchParams();
+  const normalized = value.includes("://") ? value : `http://callback${value.startsWith("?") || value.startsWith("#") ? value : `?${value}`}`;
+  try {
+    const parsed = new URL(normalized);
+    const result = new URLSearchParams(parsed.search);
+    const fragment = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
+    for (const [key, item] of new URLSearchParams(fragment)) result.set(key, item);
+    return result;
+  } catch {
+    return new URLSearchParams(value.replace(/^[?#]/, ""));
+  }
+}
+
+function decodeUserParam(value: string): Auth.User | null {
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const decoded = typeof atob !== "undefined" ? atob(padded) : Buffer.from(padded, "base64").toString("utf8");
+    const user = JSON.parse(decoded);
+    return {
+      id: user.id,
+      openId: user.openId,
+      name: user.name,
+      email: user.email,
+      loginMethod: user.loginMethod,
+      lastSignedIn: new Date(user.lastSignedIn || Date.now()),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export default function OAuthCallback() {
   const router = useRouter();
   const params = useLocalSearchParams<{
@@ -92,9 +125,8 @@ export default function OAuthCallback() {
           }
         }
 
-        // Check for error
-        const error =
-          params.error || (url ? new URL(url, "http://dummy").searchParams.get("error") : null);
+        const parsedParams = parseOAuthParams(url);
+        const error = params.error || parsedParams.get("error");
         if (error) {
           handledRef.current = true;
           console.error("[OAuth] Error parameter found:", error);
@@ -104,47 +136,9 @@ export default function OAuthCallback() {
         }
 
         // Check for code and state
-        let code: string | null = null;
-        let state: string | null = null;
-        let sessionToken: string | null = null;
-
-        // Try to get from params first
-        if (params.code && params.state) {
-          console.log("[OAuth] Using code and state from route params");
-          code = params.code;
-          state = params.state;
-        } else if (url) {
-          console.log("[OAuth] Parsing code and state from URL:", url);
-          // Parse from URL
-          try {
-            const urlObj = new URL(url);
-            code = urlObj.searchParams.get("code");
-            state = urlObj.searchParams.get("state");
-            sessionToken = urlObj.searchParams.get("sessionToken");
-            console.log("[OAuth] Extracted from URL:", {
-              code: code?.substring(0, 20) + "...",
-              state: state?.substring(0, 20) + "...",
-              sessionToken: sessionToken ? "present" : "missing",
-            });
-          } catch (e) {
-            console.log("[OAuth] Failed to parse as full URL, trying regex:", e);
-            // Try parsing as relative URL with query params
-            const match = url.match(/[?&](code|state|sessionToken)=([^&]+)/g);
-            if (match) {
-              match.forEach((param) => {
-                const [key, value] = param.substring(1).split("=");
-                if (key === "code") code = decodeURIComponent(value);
-                if (key === "state") state = decodeURIComponent(value);
-                if (key === "sessionToken") sessionToken = decodeURIComponent(value);
-              });
-              console.log("[OAuth] Extracted from regex:", {
-                code: code?.substring(0, 20) + "...",
-                state: state?.substring(0, 20) + "...",
-                sessionToken: sessionToken ? "present" : "missing",
-              });
-            }
-          }
-        }
+        const code = params.code ?? parsedParams.get("code") ?? parsedParams.get("authorization_code");
+        const state = params.state ?? parsedParams.get("state");
+        const sessionToken = params.sessionToken ?? parsedParams.get("sessionToken") ?? parsedParams.get("app_session_id");
 
         console.log("[OAuth] Final extracted values:", {
           hasCode: !!code,
@@ -156,6 +150,9 @@ export default function OAuthCallback() {
         if (sessionToken) {
           console.log("[OAuth] Session token found in URL, storing...");
           await Auth.setSessionToken(sessionToken);
+          const encodedUser = params.user ?? parsedParams.get("user");
+          const userInfo = encodedUser ? decodeUserParam(encodedUser) : null;
+          if (userInfo) await Auth.setUserInfo(userInfo);
           console.log("[OAuth] Session token stored successfully");
           // User info is already in the OAuth callback response
           // No need to fetch from API

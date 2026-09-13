@@ -78,8 +78,11 @@ export const getRedirectUri = () => {
 };
 
 export const getLoginUrl = () => {
-  const redirectUri = getRedirectUri();
-  const state = encodeState(redirectUri);
+  const nativeRedirectUri = getRedirectUri();
+  const redirectUri = ReactNative.Platform.OS === "web"
+    ? nativeRedirectUri
+    : `${getApiBaseUrl()}/api/oauth/mobile/callback`;
+  const state = encodeState(nativeRedirectUri);
 
   const url = new URL(`${OAUTH_PORTAL_URL}/app-auth`);
   url.searchParams.set("appId", APP_ID);
